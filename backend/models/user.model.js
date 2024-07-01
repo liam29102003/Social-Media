@@ -36,7 +36,7 @@ const useSchema = new mongoose.Schema(
         default: [],
       },
     ],
-    profilImg: {
+    profileImg: {
       type: String,
       default: "",
     },
@@ -52,6 +52,13 @@ const useSchema = new mongoose.Schema(
       type: String,
       default: "",
     },
+    likedPosts:[
+      {
+        type:mongoose.Schema.Types.ObjectId,
+        ref:"Post",
+        default:[],
+      }
+    ]
   },
   { timestamps: true }
 );
