@@ -1,6 +1,14 @@
 import User from "../models/user.model.js";
 import Post from "../models/post.model.js";
 import Notification from "../models/notification.model.js"
+import admin from 'firebase-admin';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+import { readFileSync } from 'fs';
+import {init} from "../lib/utils/firebaseInit.js";
+
+// Load Firebase configuration from JSON
+
 import multer from "multer";
 import path from "path";
 const storage = multer.diskStorage({
@@ -13,80 +21,107 @@ const storage = multer.diskStorage({
   },
 });
 
+init();
+const bucket = admin.storage().bucket();
+
 const upload = multer({ storage });
 export const createPost = async (req, res) => {
   try {
-    const { text } = req.body;
-    let { img } = req.body;
+    const { text, img } = req.body; // `img` is a base64-encoded string
     const userId = req.user._id.toString();
 
     const user = await User.findById(userId);
-    if (!user) return res.status(404).json({ message: "user not found" });
+    if (!user) return res.status(404).json({ message: "User not found" });
 
-    if(!text && !img)
-        {
-            return res.status(400).json({error : "Post must have text or image"});
+    if (!text && !img) {
+      return res.status(400).json({ error: "Post must have text or image" });
+    }
+
+    if (img) {
+      // Decode the base64 string to binary data
+      const base64Data = img.replace(/^data:image\/\w+;base64,/, "");
+      const buffer = Buffer.from(base64Data, 'base64');
+      const mimeType = img.match(/^data:(image\/\w+);base64,/)[1]; // Extract MIME type from base64 string
+
+      const blob = bucket.file(`${userId}-${Date.now()}`);
+      const blobStream = blob.createWriteStream({
+        metadata: {
+          contentType: mimeType // Use the extracted MIME type
         }
-    if(img)
-        {
-            const uploadSingle = upload.single("image"); // Change 'profileImg' to 'coverImg' if you want to upload cover images instead
+      });
 
-            uploadSingle(req, res, async (err) => {
-              if (err) {
-                throw err
-              }
-              const img = req.file.path;
+      blobStream.on('error', (err) => {
+        console.error(err);
+        return res.status(500).send({ message: "Error uploading image", error: err.message });
+      });
 
-            });
+      blobStream.on('finish', async () => {
+        try {
+          // Make the file public
+          await blob.makePublic();
+          
+          const imageUrl = `https://storage.googleapis.com/${bucket.name}/${blob.name}`;
+
+          const newPost = new Post({
+            user: userId,
+            text,
+            img: imageUrl
+          });
+          await newPost.save();
+          return res.status(201).json(newPost);
+        } catch (error) {
+          console.error("Error saving post:", error);
+          return res.status(500).send({ message: "Error saving post", error: error.message });
         }
-    const newPost = new Post({
+      });
+
+      blobStream.end(buffer); // Write the binary data to the stream
+    } else {
+      const newPost = new Post({
         user: userId,
-        text,
-        img
-    });
-    await newPost.save();
-    res.status(201).json(newPost);
-    
-
-   
+        text
+      });
+      await newPost.save();
+      return res.status(201).json(newPost);
+    }
   } catch (error) {
     console.error("Error creating post:", error);
-    return res
-      .status(500)
-      .send({ message: "Error creating post", error: error.message });
+    return res.status(500).send({ message: "Error creating post", error: error.message });
   }
 };
 
+
+   
+
+
 export const deletePost = async (req, res) => {
   try {
-      const post = await Post.findById(req.params.id);
-      if(!post) return res.status(404).json({error: "Post not found"});
-      if(post.user.toString() !== req.user._id.toString())
-        {
-          return res.status(401).json({error: "You are not authorized"})
-        }
-        if (post.img) {
-          const imagePath = path.join(__dirname, '..', post.imagePath);
-          fs.unlink(imagePath, (err) => {
-            if (err) {
-              console.error("Error deleting image:", err);
-              return res.status(500).json({ error: "Error deleting image" });
-            }
-          });
-        }
-    
-        // Delete the post from the database
-        await Post.findByIdAndDelete(req.params.id);
-    
-        return res.status(200).json({ message: "Post deleted successfully" });
+    const post = await Post.findById(req.params.id);
+    if (!post) return res.status(404).json({ error: "Post not found" });
+    if (post.user.toString() !== req.user._id.toString()) {
+      return res.status(401).json({ error: "You are not authorized" });
+    }
+
+    if (post.img) {
+      const fileName = post.img.split('/').pop(); // Extract the file name from the URL
+      const file = bucket.file(fileName);
+
+      // Delete the image from Firebase storage
+      await file.delete().catch((err) => {
+        console.error("Error deleting image:", err);
+        return res.status(500).json({ error: "Error deleting image" });
+      });
+    }
+
+    // Delete the post from the database
+    await Post.findByIdAndDelete(req.params.id);
+
+    return res.status(200).json({ message: "Post deleted successfully" });
   } catch (error) {
     console.error("Error deleting post:", error);
-    return res
-      .status(500)
-      .send({ message: "Error deleting post", error: error.message });
-  
+    return res.status(500).send({ message: "Error deleting post", error: error.message });
   }
-}
+};
 export const commentOnPost = async (req, res) => {
   try {
     const { text } = req.body;
@@ -130,7 +165,8 @@ export const commentOnPost = async (req, res) => {
             //unlike post
             await Post.updateOne({_id:postId}, {$pull: {likes: userId}});
             await User.updateOne({_id:userId}, {$pull: {likedPosts: postId}})
-            res.status(200).json({message: "post unliked successfully"});
+            const updatedLikes = post.likes.filter(id => id.toString()!== userId.toString());
+            res.status(200).json(updatedLikes);
           }
           else{
             //like post
@@ -143,8 +179,9 @@ export const commentOnPost = async (req, res) => {
               to: post.user,
               type:"like"
             })
-            await notification.save()
-            res.status(200).json({message: "Post liked successfully"})
+            await notification.save();
+            
+            res.status(200).json(post.likes);
           }
     } catch (error) {
     return res
@@ -177,26 +214,29 @@ export const getAllPosts = async (req, res) => {
     }
 }
 
-export const getLikedPosts = async (req, res) =>{
-  const userId = req.params.id;
-  try {
-    const user = await User.findById(userId);
-    if(!user) return res.status(404).json({error: "User not found"});
+export const getLikedPosts = async (req, res) => {
+	const userId = req.params.id;
 
-    const likedPosts = await Post.find({_id: {$in: user.likedPosts}}).populate({
-      path:"user",
-      select:"-password"
-    }).populate({
-      path: "comments.user",
-      select:"-password"
-    });
-    res.status(200).json(likedPosts);
-  } catch (error) {
-      return res
-      .status(500)
-      .send({ error: "Internal server error"});
-  }
-}
+	try {
+		const user = await User.findById(userId);
+		if (!user) return res.status(404).json({ error: "User not found" });
+
+		const likedPosts = await Post.find({ _id: { $in: user.likedPosts } })
+			.populate({
+				path: "user",
+				select: "-password",
+			})
+			.populate({
+				path: "comments.user",
+				select: "-password",
+			});
+
+		res.status(200).json(likedPosts);
+	} catch (error) {
+		console.log("Error in getLikedPosts controller: ", error);
+		res.status(500).json({ error: "Internal server error" });
+	}
+};
 
 export const getFollowingPosts = async (req, res) => {
   try {
@@ -223,23 +263,26 @@ export const getFollowingPosts = async (req, res) => {
   }
 }
 export const getUserPosts = async (req, res) => {
-  try {
-    const {username} = req.params;
-    const user = await User.findOne({username});
-    if(!user) return res.status(404).json({error: "User not found"});
-    const posts = await Post.find({user: user._id}).sort({ createdAt: -1}).populate({
-      path:"user",
-      select:"-password"
-    }).populate({
-      path: "comments.user",
-      select:"-password"
-    });
-    res.status(200).json(posts);
-  }
-  catch (error) {
-    console.log(error);
-    return res
-    .status(500)
-    .send({ error: "Internal server error"});
-  }
-}
+	try {
+		const { username } = req.params;
+
+		const user = await User.findOne({ username });
+		if (!user) return res.status(404).json({ error: "User not found" });
+
+		const posts = await Post.find({ user: user._id })
+			.sort({ createdAt: -1 })
+			.populate({
+				path: "user",
+				select: "-password",
+			})
+			.populate({
+				path: "comments.user",
+				select: "-password",
+			});
+
+		res.status(200).json(posts);
+	} catch (error) {
+		console.log("Error in getUserPosts controller: ", error);
+		res.status(500).json({ error: "Internal server error" });
+	}
+};

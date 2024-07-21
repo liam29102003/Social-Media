@@ -7,6 +7,12 @@ import path from "path";
 import * as Bytescale from "@bytescale/sdk";
 import nodeFetch from "node-fetch";
 import fs from "fs";
+import admin from 'firebase-admin';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+import { readFileSync } from 'fs';
+import {init} from "../lib/utils/firebaseInit.js";
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, "/social-media/uploads");
@@ -16,23 +22,15 @@ const storage = multer.diskStorage({
     cb(null, `${Date.now()}-${file.fieldname}${ext}`); // Append the extension to the filename
   },
 });
+// admin.initializeApp({
+//   credential: admin.credential.cert(serviceAccount),
+//   storageBucket: 'image-store-13645.appspot.com'
+// });
+init();
+const bucket = admin.storage().bucket();
 
 const upload = multer({ storage });
-// const uploadManager = new Bytescale.UploadManager({
-//   fetchApi: nodeFetch,
-//   apiKey: "public_kW15c6wCuYrnvG1Txf8dwRn6fvQ4",
-// });
-// const uploadToByteScale = async (file) => {
-//   const fileStream = fs.createReadStream(file.path);
-//   const { fileUrl, filePath } = await uploadManager.upload({
-//     data: fileStream,
-//     mime: file.mimetype,
-//     originalFileName: file.originalname,
-//     size: file.size, // Include the size if the 'data' is a stream
-//   });
-//   fs.unlinkSync(file.path); // Remove the file from the server
-//   return { fileUrl, filePath };
-// };
+
 export const getUserProfile = async (req, res) => {
   const { username } = req.params;
 
@@ -116,56 +114,10 @@ export const getSuggestedUser = async (req, res) => {
   }
 };
 
-/////////////////////upload to bytescale//////////////////////
-// export const updateUser = async (req, res) => {
-//     const uploadFields = upload.fields([
-//       { name: 'profileImg', maxCount: 1 },
-//       { name: 'coverImg', maxCount: 1 }
-//     ]);
 
-//     uploadFields(req, res, async (err) => {
-//       if (err) {
-//         return res.status(400).send({ message: 'Error uploading files', error: err });
-//       }
-
-//       const files = req.files;
-//       let profileImageResult, coverImageResult;
-
-//       try {
-//         if (files.profileImg) {
-//           profileImageResult = await uploadToByteScale(files.profileImg[0]);
-//         }
-//         if (files.coverImg) {
-//           coverImageResult = await uploadToByteScale(files.coverImg[0]);
-//         }
-
-//         // Update user data in the database here
-//         // Example: update user record with new profile and cover image URLs
-//         const userId = req.user.id; // Assuming user ID is available in the request
-//         const updatedData = {
-//           ...(profileImageResult && { profileImageUrl: profileImageResult.fileUrl }),
-//           ...(coverImageResult && { coverImageUrl: coverImageResult.fileUrl }),
-//           // Add other fields you want to update
-//         };
-
-//         // Update user in database (replace with actual DB update logic)
-//         // await UserModel.update(userId, updatedData);
-
-//         res.send({
-//           message: 'User updated successfully!',
-//           profileImage: profileImageResult,
-//           coverImage: coverImageResult
-//         });
-//       } catch (error) {
-//         console.error('Error updating user:', error);
-//         res.status(500).send({ message: 'Error updating user', error: error.message });
-//       }
-//     });
-//   };
 export const updateUser = async (req, res) => {
-  const { fullname, email, username, currentPassword, newPassword, bio, link, profileImg, coverImg } = req.body;
+  const { formData } = req.body;
   console.log(req.body);
-  let profileImagePath = "", coverImagePath = "";
   const userId = req.user._id;
   
   try {
@@ -174,37 +126,76 @@ export const updateUser = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    if ((!currentPassword && newPassword) || (currentPassword && !newPassword)) {
+    if ((!formData.currentPassword && formData.newPassword) || (formData.currentPassword && !formData.newPassword)) {
       return res.status(400).json({ error: "Please enter both current and new password" });
     }
 
-    if (currentPassword && newPassword) {
-      const isMatch = await bcrypt.compare(currentPassword, user.password);
+    if (formData.currentPassword && formData.newPassword) {
+      const isMatch = await bcrypt.compare(formData.currentPassword, user.password);
       if (!isMatch) {
         return res.status(400).json({ error: "Incorrect password" });
       }
-      if (newPassword.length < 6) {
+      if (formData.newPassword.length < 6) {
         return res.status(400).json({ error: "Password must be at least 6 characters long" });
       }
       const salt = await bcrypt.genSalt(10);
-      user.password = await bcrypt.hash(newPassword, salt);
+      user.password = await bcrypt.hash(formData.newPassword, salt);
     }
 
-    if (profileImg) {
-      profileImagePath = path.join(__dirname, profileImg); // Assuming the path is directly provided
-    }
-    if (coverImg) {
-      coverImagePath = path.join(__dirname, coverImg); // Assuming the path is directly provided
-    }
+    const uploadImage = async (img, type) => {
+      const base64Data = img.replace(/^data:image\/\w+;base64,/, "");
+      const buffer = Buffer.from(base64Data, 'base64');
+      const mimeType = img.match(/^data:(image\/\w+);base64,/)[1];
 
-    user.fullname = fullname || user.fullname;
-    user.email = email || user.email;
-    user.username = username || user.username;
-    user.bio = bio || user.bio;
-    user.link = link || user.link;
-    user.profileImg = profileImagePath || user.profileImg;
-    user.coverImg = coverImagePath || user.coverImg;
+      const blob = bucket.file(`${userId}-${type}-${Date.now()}`);
+      const blobStream = blob.createWriteStream({
+        metadata: {
+          contentType: mimeType
+        }
+      });
 
+      return new Promise((resolve, reject) => {
+        blobStream.on('error', (err) => {
+          console.error(`Error uploading ${type}:`, err);
+          reject(new Error(`Error uploading ${type}`));
+        });
+
+        blobStream.on('finish', async () => {
+          try {
+            await blob.makePublic();
+            const imageUrl = `https://storage.googleapis.com/${bucket.name}/${blob.name}`;
+            resolve(imageUrl);
+          } catch (error) {
+            console.error(`Error making ${type} public:`, error);
+            reject(new Error(`Error making ${type} public`));
+          }
+        });
+
+        blobStream.end(buffer);
+      });
+    };
+
+    let profileImagePath = user.profileImg;
+    let coverImagePath = user.converImg;
+    
+
+    if (formData.profileImg){
+      profileImagePath = await uploadImage(formData.profileImg, 'profile');
+      console.log(user.profileImg)
+    console.log(profileImagePath)
+    }
+    
+    if (formData.coverImg) {
+      coverImagePath = await uploadImage(formData.coverImg, 'cover');
+    }
+    // console.log(fullName)
+    user.fullname = formData.fullName || user.fullname;
+    user.email = formData.email || user.email;
+    user.username = formData.username || user.username;
+    user.bio = formData.bio || user.bio;
+    user.link = formData.link || user.link;
+    user.profileImg = profileImagePath;
+    user.converImg = coverImagePath;
     await user.save();
 
     return res.send({
