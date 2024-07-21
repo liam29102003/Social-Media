@@ -24,4 +24,4 @@ dist-ssr
 *.sw?
 
 .env
-firebase-config.json
+backend/lib/utils/firebase-config.json
